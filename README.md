@@ -65,3 +65,5 @@ This tool is for educational purposes only. The creator of this tool is not resp
 ## Author
 
 - [@Aiwolfie](https://github.com/AIwolfie)
+
+<a href="https://www.buymeacoffee.com/mayankmalac" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
